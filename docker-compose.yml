@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  # 应用服务
+  legal-wechat-service:
+    build: .
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=root
+      - DB_PASSWORD=password
+      - DB_NAME=legal_service
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WECOM_CORP_ID=${WECOM_CORP_ID}
+      - WECOM_APP_SECRET=${WECOM_APP_SECRET}
+      - WECOM_AGENT_ID=${WECOM_AGENT_ID}
+    depends_on:
+      - mysql
+      - redis
+    restart: unless-stopped
+
+  # MySQL数据库
+  mysql:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=password
+      - MYSQL_DATABASE=legal_service
+      - MYSQL_USER=legal_user
+      - MYSQL_PASSWORD=legal_password
+    volumes:
+      - mysql-data:/var/lib/mysql
+    restart: unless-stopped
+
+  # Redis缓存
+  redis:
+    image: redis:7.0
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  # Grafana监控
+  grafana:
+    image: grafana/grafana:9.0.0
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+
+  # Prometheus监控
+  prometheus:
+    image: prom/prometheus:v2.30.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    restart: unless-stopped
+    depends_on:
+      - legal-wechat-service
+
+volumes:
+  mysql-data:
+  redis-data:
+  grafana-data:

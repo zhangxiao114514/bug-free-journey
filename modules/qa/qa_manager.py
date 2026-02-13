@@ -111,7 +111,9 @@ class QAManager:
             'query': query,
             'answer': answer_result.get('answer', ''),
             'intent': answer_result.get('intent', ''),
-            'timestamp': datetime.now()
+            'timestamp': datetime.now(),
+            'confidence': answer_result.get('confidence', 0.0),
+            'context': answer_result.get('context', {})
         })
         
         # 限制对话轮次
@@ -124,6 +126,29 @@ class QAManager:
         # 更新上下文
         if 'context' in answer_result:
             dialogue['context'].update(answer_result['context'])
+        
+        # 提取对话主题
+        self._extract_dialogue_topic(dialogue)
+    
+    def _extract_dialogue_topic(self, dialogue: Dict[str, Any]):
+        """提取对话主题
+        
+        Args:
+            dialogue: 对话历史
+        """
+        if dialogue['rounds']:
+            # 统计所有意图的出现次数
+            intent_counts = {}
+            for round in dialogue['rounds']:
+                intent = round.get('intent', '')
+                if intent:
+                    intent_counts[intent] = intent_counts.get(intent, 0) + 1
+            
+            # 确定主要主题
+            if intent_counts:
+                main_topic = max(intent_counts.items(), key=lambda x: x[1])[0]
+                dialogue['context']['main_topic'] = main_topic
+                dialogue['context']['topic_confidence'] = intent_counts[main_topic] / len(dialogue['rounds'])
     
     def _generate_answer_by_intent(self, intent: str, query: str, dialogue: Dict[str, Any]) -> Dict[str, Any]:
         """根据意图生成回答
@@ -151,7 +176,9 @@ class QAManager:
             'company_law': self._handle_company_law,
             'other_legal_issues': self._handle_other_legal_issues,
             'inquiry': self._handle_inquiry,
-            'complaint': self._handle_complaint
+            'complaint': self._handle_complaint,
+            'clarification': self._handle_clarification,
+            'follow_up': self._handle_follow_up
         }
         
         # 调用对应的处理函数
@@ -257,6 +284,68 @@ class QAManager:
             'answer': '非常抱歉给您带来不便。您的问题已经记录，我们的客服人员会尽快与您联系。',
             'escalate_to_human': True
         }
+    
+    def _handle_clarification(self, query: str, dialogue: Dict[str, Any]) -> Dict[str, Any]:
+        """处理澄清问题"""
+        # 分析对话历史，获取之前的问题和回答
+        if dialogue['rounds']:
+            last_round = dialogue['rounds'][-1]
+            last_query = last_round.get('query', '')
+            last_answer = last_round.get('answer', '')
+            
+            # 根据之前的对话内容生成澄清回答
+            return {
+                'success': True,
+                'answer': f'关于您之前的问题"{last_query}"，我理解您可能需要更多信息。{last_answer}。如果您有具体的细节需要补充，请告诉我，我会为您提供更详细的解答。',
+                'context': {'waiting_for_clarification': True}
+            }
+        else:
+            return {
+                'success': True,
+                'answer': '请问您需要我澄清什么问题？请提供更多细节，以便我能更好地为您解答。'
+            }
+    
+    def _handle_follow_up(self, query: str, dialogue: Dict[str, Any]) -> Dict[str, Any]:
+        """处理后续问题"""
+        # 分析对话历史，获取之前的主题
+        if dialogue['rounds']:
+            # 提取之前对话的主题
+            previous_intents = [round.get('intent', '') for round in dialogue['rounds'] if round.get('intent', '')]
+            
+            if previous_intents:
+                last_intent = previous_intents[-1]
+                
+                # 根据之前的意图生成后续问题的回答
+                return {
+                    'success': True,
+                    'answer': f'关于{self._get_intent_name(last_intent)}的问题，我可以为您提供更多信息。{self._generate_answer_by_search(query).get("answer", "")}',
+                    'context': {'current_topic': last_intent}
+                }
+        
+        # 默认处理
+        return self._generate_answer_by_search(query)
+    
+    def _get_intent_name(self, intent: str) -> str:
+        """获取意图的中文名称"""
+        intent_names = {
+            'greeting': '问候',
+            'thanks': '感谢',
+            'contract_consultation': '合同咨询',
+            'labor_dispute': '劳动纠纷',
+            'civil_litigation': '民事诉讼',
+            'criminal_defense': '刑事辩护',
+            'property_rights': '财产权利',
+            'marriage_family': '婚姻家庭',
+            'intellectual_property': '知识产权',
+            'administrative_law': '行政法',
+            'company_law': '公司法',
+            'other_legal_issues': '其他法律问题',
+            'inquiry': '询问',
+            'complaint': '投诉',
+            'clarification': '澄清',
+            'follow_up': '后续问题'
+        }
+        return intent_names.get(intent, '法律问题')
     
     def _format_answer_from_knowledge(self, knowledge: Dict[str, Any]) -> str:
         """从知识库结果格式化回答

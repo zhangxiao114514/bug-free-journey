@@ -19,20 +19,36 @@ logger = logging.getLogger(__name__)
 message_counter = Counter('wecom_messages_total', 'Total number of messages processed', ['type'])
 message_error_counter = Counter('wecom_messages_errors_total', 'Total number of message processing errors')
 message_processing_time = Histogram('wecom_message_processing_seconds', 'Message processing time in seconds')
+message_queue_length = Gauge('wecom_message_queue_length', 'Message queue length')
 
 # 系统指标
 system_cpu_usage = Gauge('system_cpu_usage_percent', 'System CPU usage percentage')
 system_memory_usage = Gauge('system_memory_usage_percent', 'System memory usage percentage')
 system_disk_usage = Gauge('system_disk_usage_percent', 'System disk usage percentage')
+system_network_bytes_sent = Counter('system_network_bytes_sent_total', 'Total bytes sent over network')
+system_network_bytes_recv = Counter('system_network_bytes_recv_total', 'Total bytes received over network')
 
 # 服务指标
 service_up = Gauge('service_up', 'Service status (1=up, 0=down)')
 service_response_time = Gauge('service_response_time_seconds', 'Service response time in seconds')
+service_requests_total = Counter('service_requests_total', 'Total number of service requests', ['method', 'endpoint', 'status'])
+
+# 数据库指标
+database_connections = Gauge('database_connections_total', 'Total database connections')
+database_connection_errors = Counter('database_connection_errors_total', 'Total database connection errors')
+database_query_time = Histogram('database_query_seconds', 'Database query time in seconds')
+
+# Redis指标
+redis_connections = Gauge('redis_connections_total', 'Total Redis connections')
+redis_connection_errors = Counter('redis_connection_errors_total', 'Total Redis connection errors')
+redis_commands_total = Counter('redis_commands_total', 'Total Redis commands executed', ['command'])
 
 # 业务指标
 consultation_counter = Counter('consultations_total', 'Total number of consultations', ['status'])
 case_counter = Counter('cases_total', 'Total number of cases', ['status'])
 satisfaction_score = Gauge('average_satisfaction_score', 'Average customer satisfaction score')
+knowledge_base_size = Gauge('knowledge_base_size_total', 'Total number of knowledge base entries')
+contract_templates_total = Gauge('contract_templates_total', 'Total number of contract templates')
 
 class SystemMonitor:
     """系统监控类"""
@@ -153,14 +169,21 @@ class SystemMonitor:
             disk_usage = disk.percent
             system_disk_usage.set(disk_usage)
             
+            # 网络指标
+            net_io = psutil.net_io_counters()
+            system_network_bytes_sent.inc(net_io.bytes_sent)
+            system_network_bytes_recv.inc(net_io.bytes_recv)
+            
             self.metrics_data['system'] = {
                 'timestamp': datetime.now().isoformat(),
                 'cpu_usage': cpu_usage,
                 'memory_usage': memory_usage,
-                'disk_usage': disk_usage
+                'disk_usage': disk_usage,
+                'network_bytes_sent': net_io.bytes_sent,
+                'network_bytes_recv': net_io.bytes_recv
             }
             
-            logger.debug(f"系统指标: CPU={cpu_usage:.1f}%, 内存={memory_usage:.1f}%, 磁盘={disk_usage:.1f}%")
+            logger.debug(f"系统指标: CPU={cpu_usage:.1f}%, 内存={memory_usage:.1f}%, 磁盘={disk_usage:.1f}%, 发送字节={net_io.bytes_sent}, 接收字节={net_io.bytes_recv}")
             
         except Exception as e:
             logger.error(f"收集系统指标时出错: {e}")
@@ -169,6 +192,14 @@ class SystemMonitor:
         """收集业务指标"""
         try:
             db = next(get_db())
+            
+            # 数据库连接池状态
+            from sqlalchemy import inspect
+            inspector = inspect(db.bind)
+            pool_size = getattr(inspector.pool, '_pool_size', 0)
+            pool_overflow = getattr(inspector.pool, '_max_overflow', 0)
+            pool_used = getattr(inspector.pool, '_checkedout', 0)
+            database_connections.set(pool_used)
             
             # 消息处理量
             today = datetime.now().date()
@@ -207,19 +238,33 @@ class SystemMonitor:
                 avg_satisfaction = total_score / len(completed_consultations)
                 satisfaction_score.set(avg_satisfaction)
             
+            # 知识库大小
+            from modules.knowledge.models import KnowledgeBase
+            knowledge_count = db.query(KnowledgeBase).count()
+            knowledge_base_size.set(knowledge_count)
+            
+            # 合同模板数量
+            from modules.contract.models import ContractTemplate
+            template_count = db.query(ContractTemplate).count()
+            contract_templates_total.set(template_count)
+            
             self.metrics_data['business'] = {
                 'timestamp': datetime.now().isoformat(),
                 'today_messages': today_messages,
                 'yesterday_messages': yesterday_messages,
                 'today_consultations': today_consultations,
                 'today_cases': today_cases,
-                'avg_satisfaction': avg_satisfaction
+                'avg_satisfaction': avg_satisfaction,
+                'knowledge_base_size': knowledge_count,
+                'contract_templates_count': template_count,
+                'database_connections': pool_used
             }
             
-            logger.debug(f"业务指标: 今日消息={today_messages}, 昨日消息={yesterday_messages}, 今日咨询={today_consultations}, 今日案例={today_cases}, 平均满意度={avg_satisfaction:.1f}")
+            logger.debug(f"业务指标: 今日消息={today_messages}, 昨日消息={yesterday_messages}, 今日咨询={today_consultations}, 今日案例={today_cases}, 平均满意度={avg_satisfaction:.1f}, 知识库大小={knowledge_count}, 合同模板数={template_count}, 数据库连接数={pool_used}")
             
         except Exception as e:
             logger.error(f"收集业务指标时出错: {e}")
+            database_connection_errors.inc()
         finally:
             db.close()
     
@@ -232,6 +277,34 @@ class SystemMonitor:
             
             # 服务状态
             service_up.set(1)
+            
+            # Redis连接状态
+            try:
+                from modules.message.wechat_service import message_service
+                if message_service.redis_client:
+                    # 检查Redis连接
+                    message_service.redis_client.ping()
+                    redis_connections.set(1)
+                    
+                    # 获取消息队列长度
+                    queue_length = message_service.redis_client.llen(message_service.message_queue)
+                    message_queue_length.set(queue_length)
+                    
+                    # 获取处理中队列长度
+                    processing_length = message_service.redis_client.scard(message_service.processing_queue)
+                    
+                    # 获取失败队列长度
+                    failed_length = message_service.redis_client.scard(message_service.failed_queue)
+                    
+                    logger.debug(f"Redis指标: 连接正常, 消息队列长度={queue_length}, 处理中={processing_length}, 失败={failed_length}")
+                else:
+                    redis_connections.set(0)
+                    message_queue_length.set(0)
+                    logger.debug("Redis指标: 连接不可用")
+            except Exception as e:
+                logger.error(f"收集Redis指标时出错: {e}")
+                redis_connection_errors.inc()
+                redis_connections.set(0)
             
             self.metrics_data['service'] = {
                 'timestamp': datetime.now().isoformat(),

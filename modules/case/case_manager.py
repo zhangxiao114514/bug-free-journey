@@ -1,7 +1,7 @@
 import logging
 import os
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from utils.database import get_db
 from modules.case.models import Case, CaseTag, CaseDocument, CaseProgress, CaseStatus, CaseType
@@ -478,6 +478,275 @@ class CaseManager:
             已完成案例列表
         """
         return self.list_cases(status=CaseStatus.COMPLETED)
+    
+    def batch_assign_cases(self, case_ids: List[int], user_id: int) -> int:
+        """批量分配案例
+        
+        Args:
+            case_ids: 案例ID列表
+            user_id: 分配的用户ID
+            
+        Returns:
+            分配的案例数量
+        """
+        db = next(get_db())
+        try:
+            # 更新案例
+            cases = db.query(Case).filter(Case.id.in_(case_ids)).all()
+            assigned_count = 0
+            
+            for case in cases:
+                case.user_id = user_id
+                case.status = CaseStatus.PROCESSING
+                case.updated_at = datetime.now()
+                assigned_count += 1
+            
+            db.commit()
+            logger.info(f"批量分配案例成功: {assigned_count} 个案例")
+            return assigned_count
+            
+        except Exception as e:
+            db.rollback()
+            logger.error(f"批量分配案例时出错: {e}")
+            raise
+        finally:
+            db.close()
+    
+    def batch_update_case_status(self, case_ids: List[int], status: str) -> int:
+        """批量更新案例状态
+        
+        Args:
+            case_ids: 案例ID列表
+            status: 新状态
+            
+        Returns:
+            更新的案例数量
+        """
+        db = next(get_db())
+        try:
+            # 更新案例
+            cases = db.query(Case).filter(Case.id.in_(case_ids)).all()
+            updated_count = 0
+            
+            for case in cases:
+                case.status = status
+                if status == CaseStatus.COMPLETED:
+                    case.end_date = datetime.now()
+                case.updated_at = datetime.now()
+                updated_count += 1
+            
+            db.commit()
+            logger.info(f"批量更新案例状态成功: {updated_count} 个案例")
+            return updated_count
+            
+        except Exception as e:
+            db.rollback()
+            logger.error(f"批量更新案例状态时出错: {e}")
+            raise
+        finally:
+            db.close()
+    
+    def get_case_statistics(self, days: int = 30) -> Dict[str, Any]:
+        """获取案例统计信息
+        
+        Args:
+            days: 统计天数
+            
+        Returns:
+            统计信息
+        """
+        db = next(get_db())
+        try:
+            # 计算统计开始时间
+            start_date = datetime.now() - timedelta(days=days)
+            
+            # 统计案例总数
+            total_cases = db.query(Case).filter(Case.created_at >= start_date).count()
+            
+            # 按状态统计
+            status_stats = {}
+            for status in [CaseStatus.PENDING, CaseStatus.PROCESSING, CaseStatus.COMPLETED]:
+                count = db.query(Case).filter(
+                    Case.created_at >= start_date,
+                    Case.status == status
+                ).count()
+                status_stats[status] = count
+            
+            # 按类型统计
+            type_stats = {}
+            cases_by_type = db.query(
+                Case.case_type,
+                db.func.count(Case.id)
+            ).filter(
+                Case.created_at >= start_date
+            ).group_by(Case.case_type).all()
+            for case_type, count in cases_by_type:
+                type_stats[case_type] = count
+            
+            # 统计平均处理时间
+            completed_cases = db.query(Case).filter(
+                Case.created_at >= start_date,
+                Case.status == CaseStatus.COMPLETED,
+                Case.end_date.isnot(None)
+            ).all()
+            avg_processing_time = 0
+            if completed_cases:
+                total_time = sum(
+                    (case.end_date - case.created_at).total_seconds()
+                    for case in completed_cases
+                    if case.end_date
+                )
+                avg_processing_time = total_time / len(completed_cases)
+            
+            # 统计满意度
+            satisfaction_stats = {
+                'count': 0,
+                'average': 0
+            }
+            satisfied_cases = db.query(Case).filter(
+                Case.created_at >= start_date,
+                Case.status == CaseStatus.COMPLETED,
+                Case.satisfaction_score.isnot(None)
+            ).all()
+            if satisfied_cases:
+                satisfaction_stats['count'] = len(satisfied_cases)
+                satisfaction_stats['average'] = sum(
+                    case.satisfaction_score
+                    for case in satisfied_cases
+                ) / len(satisfied_cases)
+            
+            return {
+                'total_cases': total_cases,
+                'status_stats': status_stats,
+                'type_stats': type_stats,
+                'avg_processing_time_seconds': avg_processing_time,
+                'satisfaction_stats': satisfaction_stats,
+                'start_date': start_date.isoformat(),
+                'end_date': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"获取案例统计信息时出错: {e}")
+            raise
+        finally:
+            db.close()
+    
+    def update_case_priority(self, case_id: int, priority: int) -> Case:
+        """更新案例优先级
+        
+        Args:
+            case_id: 案例ID
+            priority: 新优先级
+            
+        Returns:
+            更新后的案例
+        """
+        db = next(get_db())
+        try:
+            # 查找案例
+            case = db.query(Case).filter(Case.id == case_id).first()
+            if not case:
+                raise ValueError(f"案例不存在: {case_id}")
+            
+            # 更新优先级
+            case.priority = priority
+            case.updated_at = datetime.now()
+            
+            db.commit()
+            db.refresh(case)
+            
+            logger.info(f"更新案例优先级成功: {case.title} - 优先级 {priority}")
+            return case
+            
+        except Exception as e:
+            db.rollback()
+            logger.error(f"更新案例优先级时出错: {e}")
+            raise
+        finally:
+            db.close()
+    
+    def get_high_priority_cases(self, limit: int = 10) -> List[Case]:
+        """获取高优先级案例
+        
+        Args:
+            limit: 返回数量
+            
+        Returns:
+            高优先级案例列表
+        """
+        db = next(get_db())
+        try:
+            # 获取优先级大于等于2的案例
+            cases = db.query(Case).filter(
+                Case.priority >= 2,
+                Case.status.in_([CaseStatus.PENDING, CaseStatus.PROCESSING])
+            ).order_by(
+                Case.priority.desc(),
+                Case.created_at.desc()
+            ).limit(limit).all()
+            
+            return cases
+            
+        finally:
+            db.close()
+    
+    def export_cases(self, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """导出案例
+        
+        Args:
+            filters: 过滤条件
+            
+        Returns:
+            案例数据列表
+        """
+        db = next(get_db())
+        try:
+            # 构建查询
+            query = db.query(Case)
+            
+            # 应用过滤条件
+            if filters:
+                if 'status' in filters:
+                    query = query.filter(Case.status == filters['status'])
+                if 'case_type' in filters:
+                    query = query.filter(Case.case_type == filters['case_type'])
+                if 'start_date' in filters:
+                    query = query.filter(Case.created_at >= filters['start_date'])
+                if 'end_date' in filters:
+                    query = query.filter(Case.created_at <= filters['end_date'])
+            
+            # 执行查询
+            cases = query.all()
+            
+            # 构建导出数据
+            export_data = []
+            for case in cases:
+                case_data = {
+                    'id': case.id,
+                    'case_id': case.case_id,
+                    'title': case.title,
+                    'description': case.description,
+                    'case_type': case.case_type,
+                    'status': case.status,
+                    'priority': case.priority,
+                    'customer_id': case.customer_id,
+                    'user_id': case.user_id,
+                    'satisfaction_score': case.satisfaction_score,
+                    'feedback': case.feedback,
+                    'created_at': case.created_at.isoformat(),
+                    'updated_at': case.updated_at.isoformat(),
+                    'end_date': case.end_date.isoformat() if case.end_date else None
+                }
+                export_data.append(case_data)
+            
+            logger.info(f"导出案例成功: {len(export_data)} 个案例")
+            return export_data
+            
+        except Exception as e:
+            logger.error(f"导出案例时出错: {e}")
+            raise
+        finally:
+            db.close()
 
 # 创建案例管理器实例
 case_manager = CaseManager()
