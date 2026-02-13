@@ -10,6 +10,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 
 from utils.database import get_db
+from utils.config import config_manager
 from modules.customer.models import Customer, CustomerTag
 from modules.customer.audit_manager import audit_manager
 
@@ -22,6 +23,28 @@ class AICustomerManager:
         # 初始化模型和配置
         self.model_cache = {}
         self.scaler = StandardScaler()
+        
+        # 加载配置
+        self.api_enabled = config_manager.getboolean('ai', 'api_enabled', False)
+        self.api_key = config_manager.get('ai', 'api_key', '')
+        self.api_url = config_manager.get('ai', 'api_url', '')
+        self.api_timeout = config_manager.getint('ai', 'api_timeout', 30)
+        self.api_retry_count = config_manager.getint('ai', 'api_retry_count', 3)
+        self.api_retry_delay = config_manager.getint('ai', 'api_retry_delay', 2)
+        self.api_concurrency_limit = config_manager.getint('ai', 'api_concurrency_limit', 10)
+        self.api_rate_limit = config_manager.getint('ai', 'api_rate_limit', 60)
+        
+        # AI分析配置
+        self.analysis_enabled = config_manager.getboolean('ai', 'analysis_enabled', True)
+        self.analysis_interval = config_manager.getint('ai', 'analysis_interval', 3600)
+        self.max_customers_per_batch = config_manager.getint('ai', 'max_customers_per_batch', 100)
+        self.risk_assessment_enabled = config_manager.getboolean('ai', 'risk_assessment_enabled', True)
+        self.value_prediction_enabled = config_manager.getboolean('ai', 'value_prediction_enabled', True)
+        self.needs_prediction_enabled = config_manager.getboolean('ai', 'needs_prediction_enabled', True)
+        
+        logger.info(f"AI客户管理器初始化完成: API启用={self.api_enabled}, 分析启用={self.analysis_enabled}")
+        
+        # 初始化模型
         self.initialize_models()
     
     def initialize_models(self):
