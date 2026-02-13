@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 
 from utils.database import get_db
+from utils.config import config_manager
 from modules.customer.models import AIAudit
 
 logger = logging.getLogger(__name__)
@@ -38,9 +39,17 @@ class AuditManager:
             'HIGH': 'high',
             'URGENT': 'urgent'
         }
+        
+        # 加载配置
+        self.audit_enabled = config_manager.getboolean('ai', 'audit_enabled', True)
+        self.audit_expiry_days = config_manager.getint('ai', 'audit_expiry_days', 7)
+        self.audit_notification_enabled = config_manager.getboolean('ai', 'audit_notification_enabled', True)
+        self.audit_default_priority = config_manager.get('ai', 'audit_default_priority', 'medium')
+        
+        logger.info(f"审核管理器初始化完成: 审核启用={self.audit_enabled}, 过期天数={self.audit_expiry_days}")
     
     def create_audit(self, operation_type: str, target_id: int, data: Dict[str, Any], 
-                    description: str = None, priority: str = 'medium') -> AIAudit:
+                    description: str = None, priority: str = None) -> AIAudit:
         """创建审核记录
         
         Args:
@@ -57,6 +66,10 @@ class AuditManager:
         try:
             # 生成审核ID
             audit_id = f"AUDIT_{datetime.now().strftime('%Y%m%d%H%M%S')}_{target_id}_{operation_type[:3]}"
+            
+            # 使用默认优先级（如果未提供）
+            if priority is None:
+                priority = self.audit_default_priority
             
             # 创建审核记录
             audit = AIAudit(
@@ -310,17 +323,21 @@ class AuditManager:
         finally:
             db.close()
     
-    def expire_old_audits(self, days: int = 7) -> int:
+    def expire_old_audits(self, days: int = None) -> int:
         """过期旧审核记录
         
         Args:
-            days: 过期天数
+            days: 过期天数（默认使用配置文件中的设置）
             
         Returns:
             过期的记录数量
         """
         db = next(get_db())
         try:
+            # 使用配置的过期天数（如果未提供）
+            if days is None:
+                days = self.audit_expiry_days
+            
             # 计算过期时间
             expire_time = datetime.now() - timedelta(days=days)
             

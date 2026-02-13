@@ -8,6 +8,7 @@ from typing import List
 from modules.customer.ai_customer_manager import ai_customer_manager
 from modules.customer.audit_manager import audit_manager
 from utils.database import get_db
+from utils.config import config_manager
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,12 @@ class CustomerTasks:
         self.is_running = False
         self.task_thread = None
         self.scheduled_tasks = []
+        
+        # 加载配置
+        self.analysis_interval = config_manager.getint('ai', 'analysis_interval', 3600)
+        self.max_customers_per_batch = config_manager.getint('ai', 'max_customers_per_batch', 100)
+        
+        logger.info(f"客户后台任务初始化完成: 分析间隔={self.analysis_interval}秒")
     
     def start(self):
         """启动后台任务"""
